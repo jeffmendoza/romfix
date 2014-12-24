@@ -2,18 +2,27 @@ package main
 
 import (
 	"archive/zip"
-	"bytes"
-	"crypto/sha1"
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"io/ioutil"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 )
+
+type GameZip struct {
+	Name string
+	Err  error
+	ROMs []ROM
+}
+
+type ROM struct {
+	Name string
+	Size uint64
+	CRC  uint32
+	SHA1 []byte
+}
 
 type MameXML struct {
 	Build string    `xml:"build,attr"`
@@ -22,6 +31,8 @@ type MameXML struct {
 
 type GameXML struct {
 	Name        string   `xml:"name,attr"`
+	Parent      string   `xml:"cloneof,attr"`
+	BIOS        string   `xml:"romof,attr"`
 	SourceFile  string   `xml:"sourcefile,attr"`
 	Description string   `xml:"description"`
 	ROMs        []ROMXML `xml:"rom"`
@@ -29,12 +40,61 @@ type GameXML struct {
 
 type ROMXML struct {
 	Name   string `xml:"name,attr"`
-	Size   int    `xml:"size,attr"`
+	Size   uint64 `xml:"size,attr"`
 	CRCS   string `xml:"crc,attr"`
 	SHA1S  string `xml:"sha1,attr"`
 	Status string `xml:"status,attr"`
 	CRC    uint32
 	SHA1   []byte
+}
+
+func readZips() []GameZip {
+	romPath := "/home/jeffm/jeff/mame/roms-0153"
+
+	zipFiles, err := ioutil.ReadDir(romPath)
+	if err != nil {
+		fmt.Printf("Could not open rom dir: %v\n", err)
+		return nil
+	}
+
+	gameZips := make([]GameZip, 0, 32)
+
+	for _, zipFile := range zipFiles {
+		splitName := strings.Split(zipFile.Name(), ".")
+		if len(splitName) != 2 || splitName[1] != "zip" {
+			// not a rom
+			continue
+		}
+		gameZip := GameZip{Name: splitName[0]}
+
+		zipPath := filepath.Join(romPath, zipFile.Name())
+		zipReader, err := zip.OpenReader(zipPath)
+		if err != nil {
+			gameZip.Err = fmt.Errorf("Error opening rom %s: %v",
+				zipFile.Name(), err)
+			continue
+		}
+		defer zipReader.Close()
+
+		for _, romFile := range zipReader.File {
+			// romReader, err := romFile.Open()
+			// if err != nil {
+			// 	continue
+			// }
+			// defer romReader.Close()
+			// hsh := sha1.New()
+			// io.Copy(hsh, romReader)
+			// sha := hsh.Sum(nil)
+			// rom := ROM{Name: romFile.Name, SHA1: sha,
+			// 	CRC: romFile.CRC32}
+			rom := ROM{Name: romFile.Name,
+				CRC:  romFile.CRC32,
+				Size: romFile.UncompressedSize64}
+			gameZip.ROMs = append(gameZip.ROMs, rom)
+		}
+		gameZips = append(gameZips, gameZip)
+	}
+	return gameZips
 }
 
 func readXML() (*MameXML, error) {
@@ -53,15 +113,19 @@ func readXML() (*MameXML, error) {
 		roms := make([]ROMXML, 0, len(game.ROMs))
 		for _, rom := range game.ROMs {
 			if rom.Status != "nodump" {
-				new_rom := ROMXML{Name: rom.Name, Size: rom.Size}
+				new_rom := ROMXML{Name: rom.Name,
+					Size: rom.Size}
 				crc, err := strconv.ParseUint(rom.CRCS, 16, 32)
 				if err != nil {
-					return nil, fmt.Errorf("Error converting rom crc %s %s: %v", game.Name, rom.Name, err)
+					return nil, fmt.Errorf(
+						"Error converting rom crc %s %s: %v",
+						game.Name, rom.Name, err)
 				}
 				new_rom.CRC = uint32(crc)
 				new_rom.SHA1, err = hex.DecodeString(rom.SHA1S)
 				if err != nil {
-					return nil, fmt.Errorf("Error converting rom sha1: %v", err)
+					return nil, fmt.Errorf(
+						"Error converting rom sha1: %v", err)
 				}
 				roms = append(roms, new_rom)
 			}
@@ -93,60 +157,151 @@ func findGame(name string, mame *MameXML) (*GameXML, error) {
 	return nil, fmt.Errorf("Game %s not found in xml", name)
 }
 
-func findROM(name string, files []*zip.File) (*zip.File, error) {
-	for _, file := range files {
-		if file.Name == name {
-			return file, nil
+// func findROMfile(name string, files []*zip.File) (*zip.File, error) {
+// 	for _, file := range files {
+// 		if file.Name == name {
+// 			return file, nil
+// 		}
+// 	}
+// 	return nil, fmt.Errorf("ROM %s not found in zip", name)
+// }
+
+func findROM(name string, gameZip GameZip, parentZip, biosZip *GameZip) (*ROM, error) {
+	for _, rom := range gameZip.ROMs {
+		if rom.Name == name {
+			return &rom, nil
+		}
+	}
+	if parentZip != nil {
+		for _, rom := range parentZip.ROMs {
+			if rom.Name == name {
+				return &rom, nil
+			}
+		}
+	}
+	if biosZip != nil {
+		for _, rom := range biosZip.ROMs {
+			if rom.Name == name {
+				return &rom, nil
+			}
 		}
 	}
 	return nil, fmt.Errorf("ROM %s not found in zip", name)
 }
 
-func validate(myROM os.FileInfo, mame *MameXML) []error {
-	errors := make([]error, 0, 10)
-	romPath := "/home/jeffm/jeff/mame/roms-0153"
+// func validate(zipFile os.FileInfo, mame *MameXML) []error {
+// 	errors := make([]error, 0, 10)
+// 	romPath := "/home/jeffm/jeff/mame/roms-0153"
 
-	splitName := strings.Split(myROM.Name(), ".")
-	if len(splitName) != 2 || splitName[1] != "zip" {
-		return append(errors, fmt.Errorf("%v not a rom", myROM.Name()))
-	}
-	game, err := findGame(splitName[0], mame)
-	if err != nil {
-		return append(errors, err)
-	}
+// 	splitName := strings.Split(zipFile.Name(), ".")
+// 	if len(splitName) != 2 || splitName[1] != "zip" {
+// 		return append(errors, fmt.Errorf("%v not a rom", zipFile.Name()))
+// 	}
+// 	game, err := findGame(splitName[0], mame)
+// 	if err != nil {
+// 		return append(errors, err)
+// 	}
 
-	romFileName := filepath.Join(romPath, myROM.Name())
-	romZip, err := zip.OpenReader(romFileName)
-	if err != nil {
-		return append(errors, fmt.Errorf("Error opening rom %s: %v", romFileName, err))
-	}
-	defer romZip.Close()
+// 	romFileName := filepath.Join(romPath, zipFile.Name())
+// 	romZip, err := zip.OpenReader(romFileName)
+// 	if err != nil {
+// 		return append(errors, fmt.Errorf("Error opening rom %s: %v",
+// 			romFileName, err))
+// 	}
+// 	defer romZip.Close()
 
-	for _, romInfo := range game.ROMs {
-		rom, err := findROM(romInfo.Name, romZip.File)
+// 	for _, romInfo := range game.ROMs {
+// 		rom, err := findROMfile(romInfo.Name, romZip.File)
+// 		if err != nil {
+// 			errors = append(errors, fmt.Errorf("game %s: %v",
+// 				game.Name, err))
+// 			continue
+// 		}
+// 		romReader, err := rom.Open()
+// 		if err != nil {
+// 			errors = append(errors, fmt.Errorf(
+// 				"error opening rom inside zip %s: %v",
+// 				rom.Name, err))
+// 			continue
+// 		}
+// 		defer romReader.Close()
+// 		hsh := sha1.New()
+// 		io.Copy(hsh, romReader)
+// 		sha := hsh.Sum(nil)
+// 		if !bytes.Equal(sha, romInfo.SHA1) {
+// 			errors = append(errors, fmt.Errorf(
+// 				"game %s: Invalid rom %s, found %x, expected %x",
+// 				game.Name, rom.Name, sha, romInfo.SHA1))
+// 			continue
+// 		}
+// 	}
+// 	return errors
+// }
+
+func findGameZip(name string, gameZips []GameZip) (*GameZip, error) {
+	for _, zip := range gameZips {
+		if zip.Name == name {
+			return &zip, nil
+		}
+	}
+	return nil, fmt.Errorf("GameZip %s not found in romdir", name)
+}
+
+func findProblems(mameInfo *MameXML, gameZips []GameZip) {
+	for _, gameZip := range gameZips {
+		gameInfo, err := findGame(gameZip.Name, mameInfo)
 		if err != nil {
-			errors = append(errors, fmt.Errorf("game %s: %v", game.Name, err))
+			fmt.Printf("error: %v\n", err)
 			continue
 		}
-		romReader, err := rom.Open()
-		if err != nil {
-			errors = append(errors, fmt.Errorf("error opening rom inside zip %s: %v", rom.Name, err))
-			continue
+		var parentZip *GameZip
+		var biosZip *GameZip
+		if gameInfo.Parent != "" {
+			parentZip, err = findGameZip(gameInfo.Parent, gameZips)
+			if err != nil {
+				fmt.Printf("game %s: %v\n", gameInfo.Name, err)
+				continue
+			}
+			parentInfo, err := findGame(gameInfo.Parent, mameInfo)
+			if err != nil {
+				fmt.Printf("game %s: %v\n", gameInfo.Name, err)
+				continue
+			}
+			if parentInfo.BIOS != "" {
+				biosZip, err = findGameZip(gameInfo.BIOS, gameZips)
+				if err != nil {
+					fmt.Printf("game %s: %v\n", gameInfo.Name, err)
+					continue
+				}
+			}
+		} else if gameInfo.BIOS != "" {
+			biosZip, err = findGameZip(gameInfo.BIOS, gameZips)
+			if err != nil {
+				fmt.Printf("game %s: %v\n", gameInfo.Name, err)
+				continue
+			}
 		}
-		defer romReader.Close()
-		hsh := sha1.New()
-		io.Copy(hsh, romReader)
-		sha := hsh.Sum(nil)
-		if !bytes.Equal(sha, romInfo.SHA1) {
-			errors = append(errors, fmt.Errorf("game %s: Invalid rom %s, found %x, expected %x", game.Name, rom.Name, sha, romInfo.SHA1))
-			continue
+		for _, romInfo := range gameInfo.ROMs {
+			rom, err := findROM(romInfo.Name, gameZip, parentZip, biosZip)
+			if err != nil {
+				fmt.Printf("game %s: %v\n", gameInfo.Name, err)
+				continue
+			}
+			if rom.Size != romInfo.Size {
+				fmt.Printf("game %s: rom %s: size invalid\n", gameInfo.Name, romInfo.Name)
+				continue
+			}
+			if rom.CRC != romInfo.CRC {
+				fmt.Printf("game %s: rom %s: crc invalid\n", gameInfo.Name, romInfo.Name)
+				continue
+			}
 		}
 	}
-	return errors
 }
 
 func main() {
 	mame, err := readXML()
+
 	if err != nil {
 		fmt.Printf("error: %v\n", err)
 		return
@@ -154,24 +309,28 @@ func main() {
 
 	// printDebug(mame)
 
-	romPath := "/home/jeffm/jeff/mame/roms-0153"
+	gameZips := readZips()
 
-	myROMs, err := ioutil.ReadDir(romPath)
-	if err != nil {
-		fmt.Printf("error: %v\n", err)
-		return
-	}
+	findProblems(mame, gameZips)
 
-	for _, myROM := range myROMs {
-		errs := validate(myROM, mame)
-		if len(errs) != 0 {
-			for _, err := range errs {
-				fmt.Printf("invalid: %v\n", err)
-			}
-		} else {
-			//fmt.Printf("%s is valid\n", myROM.Name())
-		}
-	}
+	// romPath := "/home/jeffm/jeff/mame/roms-0153"
+
+	// zipFiles, err := ioutil.ReadDir(romPath)
+	// if err != nil {
+	// 	fmt.Printf("error: %v\n", err)
+	// 	return
+	// }
+
+	// for _, zipFile := range zipFiles {
+	// 	errs := validate(zipFile, mame)
+	// 	if len(errs) != 0 {
+	// 		for _, err := range errs {
+	// 			fmt.Printf("invalid: %v\n", err)
+	// 		}
+	// 	} else {
+	// 		//fmt.Printf("%s is valid\n", zipFile.Name())
+	// 	}
+	// }
 }
 
 // func blockHash(romReader io.Reader) {
