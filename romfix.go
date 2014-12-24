@@ -110,6 +110,13 @@ func readXML() (*MameXML, error) {
 	}
 
 	for gameI, game := range mame.Games {
+		if game.Parent != "" {
+			for _, info := range mame.Games {
+				if info.Name == game.Parent {
+					mame.Games[gameI].BIOS = info.BIOS
+				}
+			}
+		}
 		roms := make([]ROMXML, 0, len(game.ROMs))
 		for _, rom := range game.ROMs {
 			if rom.Status != "nodump" {
@@ -247,6 +254,44 @@ func findGameZip(name string, gameZips []GameZip) (*GameZip, error) {
 	return nil, fmt.Errorf("GameZip %s not found in romdir", name)
 }
 
+func fixROM(missing ROMXML, gameZips []GameZip, gameInfo *GameXML, mameInfo *MameXML) {
+	//Check if missing rom belongs to parent or bios
+	if gameInfo.BIOS != "" {
+		for _, info := range mameInfo.Games {
+			if info.Name == gameInfo.BIOS {
+				for _, romInfo := range info.ROMs {
+					if romInfo.Name == missing.Name {
+						fmt.Printf("Missing rom should be in bios %s\n", info.Name)
+						return
+					}
+				}
+			}
+		}
+	}
+	if gameInfo.Parent != "" {
+		for _, info := range mameInfo.Games {
+			if info.Name == gameInfo.Parent {
+				for _, romInfo := range info.ROMs {
+					if romInfo.Name == missing.Name {
+						fmt.Printf("Missing rom should be in parent %s\n", info.Name)
+						return
+					}
+				}
+			}
+		}
+	}
+	for _, gameZip := range gameZips {
+		for _, rom := range gameZip.ROMs {
+			if rom.Size == missing.Size && rom.CRC == missing.CRC {
+				fmt.Printf("Missing ROM found\n")
+				fmt.Printf("Looking for %v %v 0x%x\n", missing.Name, missing.Size, missing.CRC)
+				fmt.Printf("found in %v %v\n", gameZip.Name, rom.Name)
+				fmt.Printf("size crc %v 0x%x\n", rom.Size, rom.CRC)
+			}
+		}
+	}
+}
+
 func findProblems(mameInfo *MameXML, gameZips []GameZip) {
 	for _, gameZip := range gameZips {
 		gameInfo, err := findGame(gameZip.Name, mameInfo)
@@ -262,19 +307,8 @@ func findProblems(mameInfo *MameXML, gameZips []GameZip) {
 				fmt.Printf("game %s: %v\n", gameInfo.Name, err)
 				continue
 			}
-			parentInfo, err := findGame(gameInfo.Parent, mameInfo)
-			if err != nil {
-				fmt.Printf("game %s: %v\n", gameInfo.Name, err)
-				continue
-			}
-			if parentInfo.BIOS != "" {
-				biosZip, err = findGameZip(gameInfo.BIOS, gameZips)
-				if err != nil {
-					fmt.Printf("game %s: %v\n", gameInfo.Name, err)
-					continue
-				}
-			}
-		} else if gameInfo.BIOS != "" {
+		}
+		if gameInfo.BIOS != "" {
 			biosZip, err = findGameZip(gameInfo.BIOS, gameZips)
 			if err != nil {
 				fmt.Printf("game %s: %v\n", gameInfo.Name, err)
@@ -285,14 +319,17 @@ func findProblems(mameInfo *MameXML, gameZips []GameZip) {
 			rom, err := findROM(romInfo.Name, gameZip, parentZip, biosZip)
 			if err != nil {
 				fmt.Printf("game %s: %v\n", gameInfo.Name, err)
+				fixROM(romInfo, gameZips, gameInfo, mameInfo)
 				continue
 			}
 			if rom.Size != romInfo.Size {
 				fmt.Printf("game %s: rom %s: size invalid\n", gameInfo.Name, romInfo.Name)
+				fixROM(romInfo, gameZips, gameInfo, mameInfo)
 				continue
 			}
 			if rom.CRC != romInfo.CRC {
 				fmt.Printf("game %s: rom %s: crc invalid\n", gameInfo.Name, romInfo.Name)
+				fixROM(romInfo, gameZips, gameInfo, mameInfo)
 				continue
 			}
 		}
