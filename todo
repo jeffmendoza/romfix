@@ -1,0 +1,14 @@
+args:
+  xml, romdir
+
+operations:
+check, print
+print names of problem zips
+      use with a mv/copy
+
+fix (take fix dir)
+ for missing roms:
+   check parent/bios
+     if missing rom is present in gameinfo for parent/bios just skip
+   search all zips for missing rom
+    if found, rewrite

@@ -11,6 +11,17 @@ import (
 	"strings"
 )
 
+type ROMFile struct {
+	Name string
+	SourceZip string
+	SourceName string
+}
+
+type ZipToWrite struct {
+	Name string
+	ROMs []ROMFile
+}
+
 type GameZip struct {
 	Name string
 	Err  error
